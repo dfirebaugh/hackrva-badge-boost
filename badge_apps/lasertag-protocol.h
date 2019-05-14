@@ -64,3 +64,14 @@
 #define OPCODE_BADGE_IDENTITY 0x0b
 /* low 9 bits contain badge id of this badge that is uploading to the base station */
 
+#define OPCODE_BYTE_TEST 0x0c
+
+#define NUM_LASERTAG_POWERUPS 2
+#define NUM_VENDOR_BADGES 10
+#define OPCODE_VENDOR_POWER_UP 0x0d
+#define AUTO_GRANT_POWERUP_INTERVAL 10 /* seconds */
+/* Bits 4 - 13 are badge ID of power-up grantor (same as for HIT packet). */
+/* There is a fixed mapping of low badge numbers to powerups.
+ * So vendor badges need to be in the low-badge number range (say, 1-9)
+ */
+

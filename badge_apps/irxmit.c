@@ -40,6 +40,8 @@ extern char *strcat(char *dest, const char *src);
 #define CAPTUREBADGE 10
 #define SENDNEWGAME 11 
 #define INITGAMEDATA 12 
+#define BYTETEST 13
+#define VENDOR_POWERUP 14
 
 static void app_init(void);
 static void render_screen(void);
@@ -54,6 +56,8 @@ static void zombies_game(void);
 static void capture_the_badge_game(void);
 static void send_new_game(void);
 static void init_game_data(void);
+static void byte_test(void);
+static void vendor_powerup(void);
 
 typedef void (*state_to_function_map_fn_type)(void);
 
@@ -71,6 +75,8 @@ static state_to_function_map_fn_type state_to_function_map[] = {
 	capture_the_badge_game,
 	send_new_game,
 	init_game_data,
+	byte_test,
+	vendor_powerup,
 };
 
 static struct game_data {
@@ -113,6 +119,8 @@ static struct menu_item m[] = {
         { "CAPTURE BADGE", CAPTUREBADGE },
 	{ "SEND NEW GAME", SENDNEWGAME },
 	{ "INIT GAME DATA", INITGAMEDATA  },
+	{ "BYTE TEST", BYTETEST  },
+	{ "VENDOR POWERUP", VENDOR_POWERUP  },
 	{ "EXIT\n", EXIT_APP },
 };
 
@@ -212,19 +220,19 @@ static void send_new_game(void)
 
 	switch (step_number) {
 	case 0:
-		send_duration();
+		send_start_time();
 		break;
 	case 1:
-		send_variant();
+		send_duration();
 		break;
 	case 2:
-		send_team();
+		send_variant();
 		break;
 	case 3:
-		send_id();
+		send_team();
 		break;
 	case 4:
-		send_start_time();
+		send_id();
 		break;
 	default:
 		break;
@@ -273,6 +281,26 @@ static void init_game_data(void)
 	game_data.team = (game_data.team + 1) % 4;
 	game_data.duration = 120;
 	game_data.game_id = (game_data.game_id + 1) % 1024;
+	app_state = CHECK_THE_BUTTONS;
+}
+
+static void byte_test(void)
+{
+	static unsigned char value = 0;
+
+	send_a_packet(build_packet(1, 1, BADGE_IR_GAME_ADDRESS, BADGE_IR_BROADCAST_ID,
+		(OPCODE_BYTE_TEST << 12) | value));
+	value += 1;
+	app_state = CHECK_THE_BUTTONS;
+}
+
+static void vendor_powerup(void)
+{
+	static int powerup = 0;
+
+	send_a_packet(build_packet(1, 1, BADGE_IR_GAME_ADDRESS, BADGE_IR_BROADCAST_ID,
+		(OPCODE_VENDOR_POWER_UP << 12) | ((powerup + 1) << 4) | 0));
+	powerup = (powerup + 1) % NUM_LASERTAG_POWERUPS;
 	app_state = CHECK_THE_BUTTONS;
 }
 

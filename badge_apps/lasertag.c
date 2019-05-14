@@ -86,6 +86,30 @@ static struct hit_table_entry {
 } hit_table[MAX_HIT_TABLE_ENTRIES];
 static int nhits = 0;
 
+static struct powerup {
+	char *name;
+	char obtained;
+} powerup[NUM_LASERTAG_POWERUPS] = {
+#define RESILIENCE 0
+	{ "RESILIENCE", 0 }, /* Deadtime will be 5 seconds instead of 30 */
+#define IMMUNITY 1
+	{ "IMMUNITY", 0 }, /* Immunity from one hit. */
+};
+static int continuous_powerup_granting_enabled = 0;
+
+static struct rgbcolor {
+	unsigned char r, g, b;
+} team_color[] = {
+	{ 128, 0, 0 }, /* red */
+	{ 0, 128, 0 }, /* green */
+	{ 0, 0, 128 }, /* blue */
+	{ 128, 128, 0 }, /*  yellow */
+	{ 255, 128, 0 }, /*  orange */
+	{ 128, 0, 128 }, /* purple */
+	{ 0, 128, 128 }, /* blue green */
+	{ 128, 128, 128 } /* white */
+};
+
 /* Builds up a 32 bit badge packet.
  * 1 bit for start
  * 1 bit for cmd,
@@ -142,6 +166,9 @@ static void game_shoot(void);
 static void game_confirm_exit(void);
 static void game_exit_abandoned(void);
 static void game_dump_data(void);
+static void game_grant_powerup(void);
+static void game_grant_continuous_powerup(void);
+static void game_stop_powerups(void);
 
 static enum game_state_type {
 	INITIAL_STATE = 0,
@@ -152,7 +179,10 @@ static enum game_state_type {
 	GAME_SHOOT = 5,
 	GAME_CONFIRM_EXIT = 6,
 	GAME_EXIT_ABANDONED = 7,
-	GAME_DUMP_DATA = 8
+	GAME_DUMP_DATA = 8,
+	GAME_GRANT_POWERUP = 9,
+	GAME_GRANT_CONTINUOUS_POWERUPS = 10,
+	GAME_STOP_POWERUPS = 11
 } game_state = INITIAL_STATE;
 
 /* Note, game_state_fn[] array must have an entry for every value
@@ -167,6 +197,9 @@ static game_state_function game_state_fn[] = {
 	game_confirm_exit,
 	game_exit_abandoned,
 	game_dump_data,
+	game_grant_powerup,
+	game_grant_continuous_powerup,
+	game_stop_powerups,
 };
 
 struct menu_item {
@@ -248,6 +281,8 @@ static void draw_menu(void)
 		FbMove(10, y);
 		FbWriteLine(menu.item[i].text);
 		y += 12;
+		if (y > 100)
+			break;
 	}
 
 	FbColor(GREEN);
@@ -343,6 +378,16 @@ static void draw_menu(void)
 	FbMove(131 - 4 * 8, 131 - 10);
 	FbWriteLine(badgeidstr + 4); /* only print last 4 digits, it's a 16 bit number. */
 
+	/* Draw any powerups we might have accumulated... */
+	for (i = 0; i < ARRAYSIZE(powerup); i++)
+		if (powerup[i].obtained) {
+			char buf[2];
+			buf[0] = powerup[i].name[0];
+			buf[1] = '\0';
+			FbMove(10 + 10 * i, 131 - 10);
+			FbWriteLine(buf);
+		}
+
 	game_state = GAME_SCREEN_RENDER;
 }
 
@@ -369,12 +414,24 @@ static void ir_packet_callback(struct IRpacket_t packet)
 	queue_in = next_queue_in;
 }
 
+static int is_vendor_badge(unsigned short badgeId)
+{
+	return (G_sysData.badgeId & 0x1ff) < NUM_VENDOR_BADGES && (G_sysData.badgeId & 0x1ff) >= 0;
+}
+
 static void setup_main_menu(void)
 {
 	menu_clear();
 	menu.menu_active = 1;
 	strcpy(menu.title, "");
 	menu_add_item("SHOOT", GAME_SHOOT, 0);
+	if (is_vendor_badge(G_sysData.badgeId)) {
+		menu_add_item("GIVE 1 POWERUP", GAME_GRANT_POWERUP, 0);
+		if (continuous_powerup_granting_enabled)
+			menu_add_item("STOP POWERUPS", GAME_STOP_POWERUPS, 0);
+		else
+			menu_add_item("AUTO POWERUPS", GAME_GRANT_CONTINUOUS_POWERUPS, 0);
+	}
 	menu_add_item("EXIT GAME", GAME_CONFIRM_EXIT, 0);
 	screen_changed = 1;
 }
@@ -488,7 +545,7 @@ static void set_game_start_timestamp(int time)
 static void process_hit(unsigned int packet)
 {
 	int timestamp;
-	unsigned char shooter_team = (get_payload(packet) | 0x0f);
+	unsigned char shooter_team = (get_payload(packet) & 0x0f);
 	unsigned short badgeid = get_shooter_badge_id_bits(packet);
 	timestamp = current_time - game_start_timestamp;
 	if (timestamp < 0) /* game has not started yet  */
@@ -512,6 +569,15 @@ static void process_hit(unsigned int packet)
 		return; /* hits have no effect if a known game is not in play */
 	}
 
+	/* Dodge via immunity? */
+	if (powerup[IMMUNITY].obtained) {
+		powerup[IMMUNITY].obtained = 0;
+#ifdef __linux__
+		fprintf(stderr, "lasertag: Used up hit immunity powerup\n");
+#endif
+		return;
+	}
+
 	hit_table[nhits].badgeid = badgeid;
 	hit_table[nhits].timestamp = (unsigned short) timestamp;
 	hit_table[nhits].team = shooter_team;
@@ -520,7 +586,28 @@ static void process_hit(unsigned int packet)
 	screen_changed = 1;
 	if (nhits >= MAX_HIT_TABLE_ENTRIES)
 		nhits = 0;
-	suppress_further_hits_until = current_time + 30;
+
+	if (powerup[RESILIENCE].obtained) {
+		suppress_further_hits_until = current_time + 5;
+		powerup[RESILIENCE].obtained = 0;
+#ifdef __linux__
+		fprintf(stderr, "lasertag: Used up resilience powerup\n");
+#endif
+	} else {
+		suppress_further_hits_until = current_time + 30;
+	}
+}
+
+static void process_vendor_powerup(unsigned int packet)
+{
+	unsigned short badgeid = get_shooter_badge_id_bits(packet);
+	if (badgeid < 1 || badgeid > ARRAYSIZE(powerup) + 1)
+		return;
+#ifdef __linux__
+	fprintf(stderr, "lasertag: Received powerup %d\n", badgeid - 1); 
+#endif
+	setNote(70, 4000);
+	powerup[badgeid - 1].obtained = 1;
 }
 
 static void send_ir_packet(unsigned int packet)
@@ -571,6 +658,12 @@ static void send_badge_upload_hit_record_team(struct hit_table_entry *h)
 
 static void game_dump_data(void)
 {
+	static int delay = 0;
+#ifndef __linux__
+	const int delay_count = 20000;
+#else
+	const int delay_count = 1;
+#endif
 	static int record_num = 0;
 
 	/*
@@ -581,6 +674,11 @@ static void game_dump_data(void)
 	* 5. Badge responds with triplets of OPCODE_BADGE_UPLOAD_HIT_RECORD_BADGE_ID,
 	*    OPCODE_BADGE_UPLOAD_HIT_RECORD_TIMESTAMP, and OPCODE_SET_BADGE_TEAM.
 	*/
+
+	if (delay) {
+		delay--;
+		return;
+	}
 
 	/* This check is probably racy */
 	if (((IRpacketOutNext+1) % MAXPACKETQUEUE) == IRpacketOutCurr) {
@@ -593,17 +691,54 @@ static void game_dump_data(void)
 		send_game_id_packet(game_id);
 	} else if (record_num == 2) {
 		send_badge_record_count(nhits);
-	} else if (record_num < nhits + 3) {
-		send_badge_upload_hit_record_badge_id(&hit_table[record_num - 2]);
-		send_badge_upload_hit_record_timestamp(&hit_table[record_num - 2]);
-		send_badge_upload_hit_record_team(&hit_table[record_num - 2]);
+	} else if (record_num < nhits * 3 + 3) {
+		int hit_index = (record_num - 3) / 3;
+		switch ((record_num  - 3) % 3) {
+		case 0:
+			send_badge_upload_hit_record_badge_id(&hit_table[hit_index]);
+			break;
+		case 1:
+			send_badge_upload_hit_record_timestamp(&hit_table[hit_index]);
+			break;
+		case 2:
+			send_badge_upload_hit_record_team(&hit_table[hit_index]);
+			break;
+		}
 	} else {
 		record_num = 0;
 		game_state = GAME_PROCESS_BUTTON_PRESSES;
 		return;
 	}
 	record_num++;
+	delay = delay_count;
 	return;
+}
+
+static void game_grant_powerup(void)
+{
+        int powerup = G_sysData.badgeId;
+
+	if (!is_vendor_badge(G_sysData.badgeId))
+		return;
+
+        send_ir_packet(build_ir_packet(1, 1, BADGE_IR_GAME_ADDRESS, BADGE_IR_BROADCAST_ID,
+                (OPCODE_VENDOR_POWER_UP << 12) | ((powerup + 1) << 4)));
+	if (game_state == GAME_GRANT_POWERUP)
+		game_state = GAME_MAIN_MENU;
+}
+
+static void game_grant_continuous_powerup(void)
+{
+	continuous_powerup_granting_enabled = 1;
+	setup_main_menu();
+	game_state = GAME_MAIN_MENU;
+}
+
+static void game_stop_powerups(void)
+{
+	continuous_powerup_granting_enabled = 0;
+	setup_main_menu();
+	game_state = GAME_MAIN_MENU;
 }
 
 static void process_packet(unsigned int packet)
@@ -655,6 +790,9 @@ static void process_packet(unsigned int packet)
 		 * the game has been recieved. */
 		setNote(50, 4000);
 		break;
+	case OPCODE_VENDOR_POWER_UP:
+		process_vendor_powerup(packet);
+		break;
 	default:
 		break;
 	}
@@ -681,6 +819,10 @@ static void advance_time()
 {
 	int old_time = seconds_until_game_starts;
 	int old_suppress = suppress_further_hits_until;
+	static int already_sent_powerup = 0;
+	static int timer = 0;
+
+	timer++;
 
 #ifdef __linux__
 	struct timeval tv;
@@ -692,12 +834,55 @@ static void advance_time()
 #endif
 	if (seconds_until_game_starts != NO_GAME_START_TIME && game_start_timestamp != NO_GAME_START_TIME)
 		seconds_until_game_starts = game_start_timestamp - current_time;
-	if (suppress_further_hits_until <= current_time)
+	if (suppress_further_hits_until == current_time)
+		setNote(70, 4000); /* Beep when deadtime expires */
+	if (suppress_further_hits_until <= current_time) {
 		suppress_further_hits_until = -1;
+		switch (game_variant % ARRAYSIZE(game_type)) {
+		case 0: /* free for all */
+			flareled(0, 0, 0);
+			break;
+		case 1: /* team battle */
+		case 2: /* zombies */
+		case 3: /* capture badge */
+			if (team >= 0 && team < ARRAYSIZE(team_color)) /* Set LED flare to team colors */
+				flareled(team_color[team].r, team_color[team].g, team_color[team].b);
+			else
+				flareled(0, 0, 0);
+			break;
+			/* TODO: still need to make the code to manipulate the team for zombies and capture badge */
+		default:
+			flareled(0, 0, 0);
+			break;
+		}
+	} else {
+		/* blink led red for dead time */
+#if __linux__
+		if (timer & 0x08)
+#else
+		if (timer & 0x1000) /* this will need tuning */
+#endif
+			flareled(255, 0, 0);
+		else
+#ifdef __linux__
+			flareled(128, 128, 128);
+#else
+			flareled(0, 0, 0);
+#endif
+
+	}
 	if (old_time != seconds_until_game_starts || old_suppress != suppress_further_hits_until)
 		screen_changed = 1;
 	if (old_time > 0 && seconds_until_game_starts <= 0)
 		setNote(50, 4000); /* Beep upon game start */
+	if ((current_time % AUTO_GRANT_POWERUP_INTERVAL) == 0) {
+		if (continuous_powerup_granting_enabled && !already_sent_powerup) {
+			game_grant_powerup();
+			already_sent_powerup = 1;
+		}
+	} else {
+		already_sent_powerup = 0;
+	}
 }
 
 static void game_process_button_presses(void)
@@ -733,6 +918,11 @@ static void game_shoot(void)
 {
 	unsigned int packet;
 	unsigned short payload;
+
+	if (current_time - game_start_timestamp < 0) { /* game has not started yet, do not shoot. */
+		game_state = GAME_MAIN_MENU;
+		return;
+	}
 
 	/* Player can only shoot if they are not currently dead. */
 	if (suppress_further_hits_until == -1) {
