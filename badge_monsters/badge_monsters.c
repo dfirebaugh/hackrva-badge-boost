@@ -24,13 +24,22 @@ Dustin Firebaugh <dafirebaugh@gmail.com>
 #include "colors.h"
 #include "menu.h"
 #include "buttons.h"
+#include "flash.h"
+#include "ir.h"
 
 /* TODO: I shouldn't have to declare these myself. */
 #define size_t int
 extern char *strcpy(char *dest, const char *src);
 extern char *strncpy(char *dest, const char *src, size_t n);
 extern void *memset(void *s, int c, size_t n);
+extern void *memcpy(void *dest, const void *src, size_t n);
 extern char *strcat(char *dest, const char *src);
+#ifndef NULL
+#define NULL 0
+#endif
+
+#define DISABLE_INTERRUPTS
+#define ENABLE_INTERRUPTS
 
 #endif
 
@@ -84,36 +93,69 @@ static int nmonsters = 0;
 static int nvendor_monsters = 0;
 static int app_state = INIT_APP_STATE;
 
-static struct point
+struct point
 {
     signed char x, y;
 };
 
-static struct point smiley_points[] =
+static const struct point smiley_points[] =
 #include "smileymon.h"
-static struct point freshmon_points[] =
+static const struct point freshmon_points[] =
 #include "freshmon.h"
-static struct point othermon_points[] =
+static const struct point othermon_points[] =
 #include "othermon.h"
+static const struct point mcturtle_points[] =
+#include "mcturtle.h"
+static const struct point goat_mon_points[] =
+#include "goat_mon.h"
+static const struct point hrvamon_points[] =
+#include "hrvamon.h"
+static const struct point octomon_points[] =
+#include "octomon.h"
+static const struct point zombieload_points[] =
+#include "zombieload.h"
+static const struct point spectre_points[] =
+#include "spectre.h"
+static const struct point heartbleed_points[] =
+#include "heartbleed.h"
+static const struct point stacksmasher_points[] =
+#include "stacksmasher.h"
+static const struct point worm_points[] =
+#include "worm.h"
+static const struct point godzilla_points[] =
+#include "godzilla.h"
+static const struct point eddie_points[] =
+#include "eddie.h"
 
-static struct monster
+struct monster
 {
     char name[20];
     int npoints;
     short status;
     int color;
-    struct point *drawing;
+    const struct point *drawing;
     char blurb[128];
 };
 
 struct monster monsters[] = {
-    {"freshmon", ARRAYSIZE(freshmon_points), 0, 0, freshmon_points, "this is freshmon, the freshest of all the mon"},
-    {"othermon", ARRAYSIZE(othermon_points), 0, 1, othermon_points, "some nice words here"},
+    {"eddie", ARRAYSIZE(eddie_points), 0, WHITE, eddie_points, "eddie description"},
+    {"godzilla", ARRAYSIZE(godzilla_points), 0, WHITE, godzilla_points, "godzilla description"},
+    {"worm", ARRAYSIZE(worm_points), 0, WHITE, worm_points, "worm description"},
+    {"stacksmasher", ARRAYSIZE(stacksmasher_points), 0, WHITE, stacksmasher_points, "stacksmasher description"},
+    {"heartbleed", ARRAYSIZE(heartbleed_points), 0, WHITE, heartbleed_points, "heartbleed description"},
+    {"spectre", ARRAYSIZE(spectre_points), 0, WHITE, spectre_points, "spectre description"},
+    {"zombieload", ARRAYSIZE(zombieload_points), 0, WHITE, zombieload_points, "zombieload description"},
+    {"octomon", ARRAYSIZE(octomon_points), 0, WHITE, octomon_points, "octomon description"},
+    {"hrvamon", ARRAYSIZE(hrvamon_points), 0, WHITE, hrvamon_points, "hrvamon description"},
+    {"mcturtle", ARRAYSIZE(mcturtle_points), 0, WHITE, mcturtle_points, "mcturtle description"},
+    {"goat_mon", ARRAYSIZE(goat_mon_points), 0, WHITE, goat_mon_points, "goat mon description"},
+    {"freshmon", ARRAYSIZE(freshmon_points), 0, WHITE, freshmon_points, "this is freshmon, the freshest of all the mon"},
+    {"othermon", ARRAYSIZE(othermon_points), 0, WHITE, othermon_points, "some nice words here"},
     {"smileymon", ARRAYSIZE(smiley_points), 0, RED, smiley_points, "some nice words here"},
-    {"othermon", ARRAYSIZE(smiley_points), 0, 0, othermon_points, "some nice words here"},
-    {"othermon", ARRAYSIZE(smiley_points), 0, 1, othermon_points, "some nice words here"},
+    {"othermon", ARRAYSIZE(smiley_points), 0, WHITE, othermon_points, "some nice words here"},
+    {"othermon", ARRAYSIZE(smiley_points), 0, GREEN, othermon_points, "some nice words here"},
     {"smileymon", ARRAYSIZE(smiley_points), 0, WHITE, smiley_points, "Othermon some nice words here Othermon some nice words hereOthermon some nice words here Othermon some nice words here"},
-    {"othermon", ARRAYSIZE(smiley_points), 0, 0, othermon_points, "some nice words here"},
+    {"othermon", ARRAYSIZE(smiley_points), 0, BLUE, othermon_points, "some nice words here"},
     {"othermon", ARRAYSIZE(smiley_points), 0, WHITE, othermon_points, "some nice words here"},
     {"othermon", ARRAYSIZE(smiley_points), 0, WHITE, othermon_points, "some nice words here"},
 };
@@ -127,7 +169,12 @@ struct monster vendor_monsters[] = {
 
 int initial_mon = 0;
 
-static void draw_object(struct point drawing[], int npoints, int color, int x, int y)
+#ifndef __linux__
+/* Use draw_object() from maze.c */
+extern void draw_object(const struct point drawing[], int npoints, int scale_index, int color, int x, int y);
+#else
+static void draw_object(const struct point drawing[], int npoints,
+			__attribute__((unused)) int scale_index, int color, int x, int y)
 {
 	int i;
 	int xcenter = x;
@@ -160,6 +207,7 @@ static void draw_object(struct point drawing[], int npoints, int color, int x, i
 		i++;
 	}
 }
+#endif
 
 #ifndef __linux__
 static void (*old_callback)(struct IRpacket_t) = NULL;
@@ -236,7 +284,6 @@ static void process_packet(unsigned int packet)
 {
     unsigned int payload;
     unsigned char opcode;
-    int v;
 
     if (packet == 32) /* Ignore spurious 32 that might come in. */
         return;
@@ -316,7 +363,7 @@ static void draw_menu(void)
         int nunlocked = 0;
         char available_monsters[3];
         char unlocked_monsters[3];
-        itoa(available_monsters, nmonsters + nvendor_monsters, 5);
+        itoa(available_monsters, nmonsters + nvendor_monsters, 10);
 
         for(i = 0; i < nmonsters; i++)
         {
@@ -336,7 +383,7 @@ static void draw_menu(void)
 
 
 
-        itoa(unlocked_monsters, nunlocked, 5);
+        itoa(unlocked_monsters, nunlocked, 10);
 
         FbMove(8,25);
         FbWriteLine(unlocked_monsters);
@@ -396,7 +443,7 @@ static void change_menu_level(enum menu_level_t level)
 static void show_message(char *message)
 {
     #ifdef __linux__
-        printf(message);
+        printf("%s\n", message);
     #endif
 
     FbClear();
@@ -409,7 +456,7 @@ static void show_message(char *message)
     screen_changed = 1;
 }
 
-// stage_monster_trade -- should start listening and receiving IR
+/* stage_monster_trade -- should start listening and receiving IR */
 static void stage_monster_trade(void)
 {
     show_message("Sync your badge with someone to collect more     monsters\n");
@@ -418,29 +465,27 @@ static void stage_monster_trade(void)
 static void render_monster(void)
 {
     int npoints, color;
-    struct point *drawing;
-    char *name;
+    const struct point *drawing = current_monster > 100 ? vendor_monsters[current_monster - 100].drawing : monsters[current_monster].drawing;
+    /* char *name; */
 
     if(current_monster > 100)
     {
-        name = vendor_monsters[current_monster-100].name;
-        drawing = vendor_monsters[current_monster-100].drawing;
+        /* name = vendor_monsters[current_monster-100].name; */
         npoints = vendor_monsters[current_monster-100].npoints;
         color = vendor_monsters[current_monster-100].color;
     }
     else
     {
-        name = monsters[current_monster].name;
-        drawing = monsters[current_monster].drawing;
+        /* name = monsters[current_monster].name; */
         npoints = monsters[current_monster].npoints;
         color = monsters[current_monster].color;
     }
 
 
     FbClear();
-    // FbWriteLine(name);
+    /* FbWriteLine(name); */
     FbWriteLine("\n");
-    draw_object(drawing, npoints, color, smiley_x, smiley_y);
+    draw_object(drawing, npoints, 0, color, smiley_x, smiley_y);
 
     FbMove(120,120);
     FbWriteLine(">");
@@ -462,8 +507,8 @@ static void render_screen(void)
 #ifdef __linux__
 static void print_menu_info(void)
 {
-    // int next_state = menu.item[menu.current_item].next_state
-    // system("clear");
+    /* int next_state = menu.item[menu.current_item].next_state
+       system("clear"); */
     printf("current item: %d\nmenu level: %d\ncurrent monster: %d\n menu item: %s\nn-menu-items: %d\ncookie_monster: %d\n",
     menu.current_item, menu_level, current_monster, menu.item[menu.current_item].text, menu.nitems, menu.item[menu.current_item].cookie);
 }
@@ -548,7 +593,7 @@ static void check_the_buttons(void)
             }
         }
 
-        // if the back button is pressed we will return to the main menu
+        /* if the back button is pressed we will return to the main menu */
         if(back || menu_level == INACTIVE)
             change_menu_level(MAIN_MENU);
     }
@@ -620,6 +665,9 @@ static void ir_packet_callback(struct IRpacket_t packet)
 
 static void app_init(void)
 {
+    int initial_mon;
+    int i;
+
     FbInit();
     app_state = INIT_APP_STATE;
     register_ir_packet_callback(ir_packet_callback);
@@ -633,6 +681,9 @@ static void app_init(void)
     nvendor_monsters = ARRAYSIZE(vendor_monsters);
     initial_mon = BADGE_ID % nmonsters;
     enable_monster(initial_mon);
+
+    for (i = 0; i < ARRAYSIZE(monsters); i++)
+	    monsters[i].status = 1;
 }
 
 int badge_monsters_cb(void)

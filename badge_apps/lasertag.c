@@ -104,8 +104,11 @@ static struct rgbcolor {
 	{ 255, 128, 0 }, /*  orange */
 	{ 128, 0, 128 }, /* purple */
 	{ 0, 128, 128 }, /* blue green */
+	{ 128, 128, 128 }, /* white */
 	{ 128, 128, 128 } /* white */
 };
+
+extern char username[10];
 
 /* Builds up a 32 bit badge packet.
  * 1 bit for start
@@ -144,7 +147,7 @@ static unsigned char __attribute__((unused)) get_addr_bits(unsigned int packet)
 
 static unsigned char get_shooter_badge_id_bits(unsigned int packet)
 {
-	return (unsigned char) ((packet >> 4) & 0x1ff);
+	return (unsigned char) ((packet >> 3) & 0x1ff);
 }
 
 static unsigned short get_payload(unsigned int packet)
@@ -542,7 +545,7 @@ static void set_game_start_timestamp(int time)
 static void process_hit(unsigned int packet)
 {
 	int timestamp;
-	unsigned char shooter_team = (get_payload(packet) & 0x0f);
+	unsigned char shooter_team = (get_payload(packet) & 0x07);
 	unsigned short badgeid = get_shooter_badge_id_bits(packet);
 	timestamp = current_time - game_start_timestamp;
 	if (timestamp < 0) /* game has not started yet  */
@@ -597,7 +600,7 @@ static void process_hit(unsigned int packet)
 
 static void process_vendor_powerup(unsigned int packet)
 {
-	unsigned short badgeid = get_shooter_badge_id_bits(packet);
+	unsigned short badgeid = packet & 0x1ff;
 	if (badgeid < 1 || badgeid > ARRAYSIZE(powerup) + 1)
 		return;
 #ifdef __linux__
@@ -650,8 +653,61 @@ static void send_badge_upload_hit_record_timestamp(struct hit_table_entry *h)
 static void send_badge_upload_hit_record_team(struct hit_table_entry *h)
 {
 	send_ir_packet(build_ir_packet(1, 1, BADGE_IR_GAME_ADDRESS, BADGE_IR_BROADCAST_ID,
-		(OPCODE_SET_BADGE_TEAM << 12) | (h->team & 0x0fff)));
+		(OPCODE_SET_BADGE_TEAM << 12) | (h->team & 0x07)));
 }
+
+static void send_badge_username_packet(unsigned short encoded)
+{
+	send_ir_packet(build_ir_packet(1, 1, BADGE_IR_GAME_ADDRESS, BADGE_IR_BROADCAST_ID,
+		(OPCODE_USERNAME_DATA << 12) | encoded));
+}
+
+static unsigned short encode_username_substring(char *substring, int length)
+{
+	int i, shift;
+	unsigned short encoded;
+	unsigned short answer = 0;
+
+	if (length > 2)
+		length = 2;
+	shift = 5;
+	for (i = 0; i < length; i++) {
+		if (substring[i] >= 'A' && substring[i] <= 'Z') {
+			encoded = substring[i] - 'A';
+		} else if (substring[i] == '_') {
+			encoded = 26;
+		} else {
+			encoded = 27;
+		}
+		answer = answer | (encoded << shift);
+		shift = shift - 5;
+	}
+	if (length == 1)
+		answer = answer | 27;
+#ifdef __linux__
+	printf("Encoded '%c%c' as 0x%hx\n", substring[0], substring[1], answer);
+#endif
+	return answer;
+}
+
+#ifdef __linux__
+static void decode_username_fragment(unsigned short s)
+{
+	int c[2], i;
+
+	c[0] = (s >> 5) & 0x1f;
+	c[1] = s & 0x1f;
+	for (i = 0; i < 2; i++) {
+		if (c[i] >= 0 && c[i] <= 25)
+		c[i] = c[i] + 'A';
+		if (c[i] == 27)
+			c[i] = '\0';
+		if (c[i] == 26)
+			c[i] = '_';
+	}
+	printf("0x%hx decodes to %c%c\n", s, c[0], c[1]);
+}
+#endif
 
 static void game_dump_data(void)
 {
@@ -670,6 +726,8 @@ static void game_dump_data(void)
 	* 4. Badge responds with OPCODE_BADGE_RECORD_COUNT
 	* 5. Badge responds with triplets of OPCODE_BADGE_UPLOAD_HIT_RECORD_BADGE_ID,
 	*    OPCODE_BADGE_UPLOAD_HIT_RECORD_TIMESTAMP, and OPCODE_SET_BADGE_TEAM.
+	* 6. Badge responds with 5 packets of OPCODE_USERNAME_DATA to transfer 10
+	*    characters of the badge username.
 	*/
 
 	if (delay) {
@@ -701,6 +759,16 @@ static void game_dump_data(void)
 			send_badge_upload_hit_record_team(&hit_table[hit_index]);
 			break;
 		}
+	} else if (record_num < nhits * 3 + 3 + 5) {
+		const int pkt_num = record_num - (nhits * 3 + 3);
+		const int pkt_len = 2;
+		unsigned short encoded;
+		encoded = encode_username_substring(&username[pkt_num * 2], pkt_len);
+#ifdef __linux__
+		printf("username = '%s'\n", username);
+		decode_username_fragment(encoded);
+#endif
+		send_badge_username_packet(encoded);
 	} else {
 		record_num = 0;
 		game_state = GAME_PROCESS_BUTTON_PRESSES;
@@ -719,7 +787,7 @@ static void game_grant_powerup(void)
 		return;
 
         send_ir_packet(build_ir_packet(1, 1, BADGE_IR_GAME_ADDRESS, BADGE_IR_BROADCAST_ID,
-                (OPCODE_VENDOR_POWER_UP << 12) | ((powerup + 1) << 4)));
+                (OPCODE_VENDOR_POWER_UP << 12) | ((powerup + 1) & 0x1ff)));
 	if (game_state == GAME_GRANT_POWERUP)
 		game_state = GAME_MAIN_MENU;
 }
@@ -773,7 +841,7 @@ static void process_packet(unsigned int packet)
 		game_state = GAME_DUMP_DATA;
 		break;
 	case OPCODE_SET_BADGE_TEAM:
-		team = payload & 0x0f; /* TODO sanity check this better. */
+		team = payload & 0x07; /* TODO sanity check this better. */
 		screen_changed = 1;
 		break;
 	case OPCODE_SET_GAME_VARIANT:
@@ -923,7 +991,7 @@ static void game_shoot(void)
 
 	/* Player can only shoot if they are not currently dead. */
 	if (suppress_further_hits_until == -1) {
-		payload = (OPCODE_HIT << 12) | ((G_sysData.badgeId & 0x1ff) << 4) | (team & 0x0f);
+		payload = (OPCODE_HIT << 12) | ((G_sysData.badgeId & 0x1ff) << 3) | (team & 0x07);
 		packet = build_ir_packet(0, 1, BADGE_IR_GAME_ADDRESS, BADGE_IR_BROADCAST_ID, payload);
 		send_ir_packet(packet);
 	}

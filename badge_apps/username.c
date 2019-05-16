@@ -25,7 +25,11 @@ extern char *strcat(char *dest, const char *src);
 
 /* username is a global externally visible */
 #define NAMESIZE 10
+#ifndef __linux__
 char username[NAMESIZE] = { 0 };
+#else
+extern char username[NAMESIZE];
+#endif
 
 #define INIT_APP_STATE 0
 #define DRAW_SCREEN 1
@@ -95,7 +99,6 @@ static void draw_screen(void)
 			FbColor(GREEN);
 		else
 			FbColor(WHITE);
-		char buf[2];
 		buf[0] = '_';
 		buf[1] = '\0';
 		if (username[i] >= 'A' && username[i] <= 'Z')
@@ -209,7 +212,8 @@ static void check_the_buttons(void)
 			something_changed = 1;
 		}
 	}
-	app_state = DRAW_SCREEN;
+	if (something_changed)
+		app_state = DRAW_SCREEN;
         return;
 }
 
